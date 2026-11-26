@@ -33,6 +33,7 @@ from music_assistant_models.enums import (
     ContentType,
     MediaType,
     QueueOption,
+    SourceControl,
     StreamType,
 )
 from music_assistant_models.errors import (
@@ -138,6 +139,8 @@ class _SourceClientState:
     autostart_queue_id: str | None = None
     autostart_queue_session_id: str | None = None
     suppressed_autostart_claim: tuple[str, str | None] | None = None
+    # the player a pause left the input on, which a play starts it on again
+    paused_on_player_id: str | None = None
     selection_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -261,7 +264,7 @@ class SendspinSources:
         client = self._get_client(source_id)
         if client is None or not await self._is_selectable(client):
             raise MediaNotFoundError(f"Sendspin source is not connected: {source_id}")
-        state = self._clients.setdefault(source_id, _SourceClientState())
+        state = self._selected_state(source_id)
         # Capture the source's session before waiting so delayed requests keep their
         # identity: a live source plays on the player, so the queue has no session for it.
         queue_session_id = self._player_session_id(owner_player_id)
@@ -347,6 +350,37 @@ class SendspinSources:
                     role.request_start()
         finally:
             self._drop_empty_client_state(source_id, state)
+
+    async def on_source_control(self, source_id: str, action: SourceControl) -> None:
+        """
+        Pause or play a line-in.
+
+        A pause keeps the input on its player, shown paused, and lets its stream end, which
+        asks the client to stop capturing. A play starts the input again on that player.
+        Nothing else applies to live audio.
+
+        :param source_id: The client id of the line-in.
+        :param action: What to do.
+        """
+        if action == SourceControl.PAUSE:
+            if (session := self._get_session(source_id)) is None:
+                return
+            self._clients[source_id].paused_on_player_id = session.owner_player_id
+            await self.mass.players.pause_audio_source(
+                session.owner_player_id, source_id, self.provider.instance_id
+            )
+        elif action == SourceControl.PLAY:
+            if (state := self._clients.get(source_id)) is None or (
+                player_id := state.paused_on_player_id
+            ) is None:
+                return
+            state.paused_on_player_id = None
+            self._drop_empty_client_state(source_id, state)
+            await self.mass.player_queues.play_media(
+                player_id,
+                create_uri(MediaType.AUDIO_SOURCE, self.provider.instance_id, source_id),
+                option=QueueOption.PLAY,
+            )
 
     async def on_source_unselected(
         self, source_id: str, owner_player_id: str, stream_session_id: str
@@ -519,7 +553,9 @@ class SendspinSources:
                     audio_format=OUTPUT_FORMAT,
                 )
             },
-            can_play_pause=False,
+            # a pause silences the player and stops the capture; a play starts it again live,
+            # since what the input played meanwhile is gone
+            can_play_pause=True,
             can_seek=False,
             can_next_previous=False,
             exclusive=True,
@@ -888,6 +924,12 @@ class SendspinSources:
                 self.logger.debug("Failed to stop player %s: %s", session.player_id, err)
         self._drop_empty_client_state(source_id, state)
 
+    def _selected_state(self, client_id: str) -> _SourceClientState:
+        """Return the state of a source that is being selected, which forgets any pause."""
+        state = self._clients.setdefault(client_id, _SourceClientState())
+        state.paused_on_player_id = None
+        return state
+
     def _get_session(self, client_id: str) -> _SourceSession | None:
         state = self._clients.get(client_id)
         return state.session if state is not None else None
@@ -901,6 +943,7 @@ class SendspinSources:
             and state.autostart_queue_id is None
             and state.autostart_queue_session_id is None
             and state.suppressed_autostart_claim is None
+            and state.paused_on_player_id is None
             and not state.selection_lock.locked()
         ):
             self._clients.pop(client_id)

@@ -61,6 +61,7 @@ from music_assistant_models.enums import (
     PlayerType,
     ProtocolRole,
     ProviderFeature,
+    SourceControl,
     SpeakerChannel,
 )
 from music_assistant_models.errors import (
@@ -95,7 +96,7 @@ from music_assistant.helpers.util import (
 )
 from music_assistant.helpers.virtual_player import cleanup_virtual_player
 from music_assistant.mass import MusicAssistant
-from music_assistant.models.media_capabilities import AudioSourceMixin
+from music_assistant.models.media_capabilities import AudioSourceMixin, SourceControlValue
 from music_assistant.models.player import OWN_PROTOCOL_ROLES
 from music_assistant.models.player_protocol import PlayerProtocol
 from music_assistant.models.player_provider import PlayerProvider
@@ -1645,6 +1646,12 @@ class SendspinProvider(AudioSourceMixin, PlayerProvider):
         await self.sources.on_source_selected(
             source_id, player_id, owner_player_id, stream_session_id
         )
+
+    async def on_source_control(
+        self, source_id: str, action: SourceControl, value: SourceControlValue = None
+    ) -> None:
+        """Pause or play a Sendspin line-in; it has nothing else to control."""
+        await self.sources.on_source_control(source_id, action)
 
     async def on_source_unselected(
         self, source_id: str, owner_player_id: str, stream_session_id: str

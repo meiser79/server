@@ -27,6 +27,7 @@ from music_assistant_models.enums import (
     MediaType,
     PlaybackState,
     QueueOption,
+    SourceControl,
     StreamType,
 )
 from music_assistant_models.errors import AudioError, MediaNotFoundError
@@ -1285,3 +1286,51 @@ async def test_reported_metadata_reaches_the_playing_session(fake_client: _FakeC
         "queue-1",
         sources._source_name("client-1"),
     )
+
+
+async def test_a_line_in_can_be_paused(fake_client: _FakeClient) -> None:
+    """The source offers play/pause."""
+    sources = await make_sources([fake_client])
+    [source] = await sources.get_audio_sources()
+    assert source.can_play_pause
+
+
+async def test_a_paused_line_in_plays_again_on_its_player(fake_client: _FakeClient) -> None:
+    """A pause leaves the input on its player; a play starts it there again."""
+    sources = await make_sources([fake_client])
+    await sources.on_source_selected("client-1", "player-1", "queue-1", "session-A")
+
+    await sources.on_source_control("client-1", SourceControl.PAUSE)
+    assert get_players(sources).paused == [("queue-1", "client-1")]
+
+    # the stream ends with the pause
+    await sources.on_source_unselected("client-1", "queue-1", "session-A")
+    await sources.on_source_control("client-1", SourceControl.PLAY)
+    [(queue_id, uri, option)] = get_queues(sources).played
+    assert (queue_id, option) == ("queue-1", QueueOption.PLAY)
+    assert uri.endswith("client-1")
+
+    # once played, a second play has nothing to resume
+    await sources.on_source_control("client-1", SourceControl.PLAY)
+    assert len(get_queues(sources).played) == 1
+
+
+async def test_play_without_a_pause_does_nothing(fake_client: _FakeClient) -> None:
+    """Nothing paused, nothing to start; a pause with nothing playing does nothing either."""
+    sources = await make_sources([fake_client])
+    await sources.on_source_control("client-1", SourceControl.PLAY)
+    await sources.on_source_control("client-1", SourceControl.PAUSE)
+    assert get_queues(sources).played == []
+    assert get_players(sources).paused == []
+
+
+async def test_a_new_selection_forgets_the_pause(fake_client: _FakeClient) -> None:
+    """Selected again elsewhere after a pause, a later play does not pull it back."""
+    sources = await make_sources([fake_client])
+    await sources.on_source_selected("client-1", "player-1", "queue-1", "session-A")
+    await sources.on_source_control("client-1", SourceControl.PAUSE)
+    await sources.on_source_unselected("client-1", "queue-1", "session-A")
+
+    await sources.on_source_selected("client-1", "player-2", "queue-2", "session-B")
+    await sources.on_source_control("client-1", SourceControl.PLAY)
+    assert get_queues(sources).played == []

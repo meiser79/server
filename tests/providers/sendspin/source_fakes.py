@@ -199,6 +199,8 @@ class _FakePlayers:
         self.refreshed: list[tuple[str, Any]] = []
         # live metadata pushed to a session, with the player it plays on
         self.source_metadata: list[tuple[str, Any]] = []
+        # sources paused on a player, as (player id, source id)
+        self.paused: list[tuple[str, str]] = []
 
     def get_player(self, player_id: str, *args: Any, **kwargs: Any) -> _FakePlayer | None:
         return self.players.get(player_id)
@@ -220,6 +222,11 @@ class _FakePlayers:
 
     def refresh_source(self, player_id: str, source: Any) -> None:
         self.refreshed.append((player_id, source))
+
+    async def pause_audio_source(
+        self, player_id: str, source_id: str, provider_instance_id: str
+    ) -> None:
+        self.paused.append((player_id, source_id))
 
     def update_source_metadata(
         self, player_id: str, source_id: str, provider_instance_id: str, stream_metadata: Any
