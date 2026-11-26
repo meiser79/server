@@ -24,6 +24,8 @@ class _FakeSourceRole:
         self.start_requests = 0
         self.stop_requests = 0
         self.stream_active = False
+        # what the client last reported its input plays
+        self.metadata: Any = None
 
     def request_start(self) -> None:
         self.start_requests += 1
@@ -107,6 +109,8 @@ class _FakeServerApi:
         self.pairing_store = _FakePairingStore()
         self.client_urls = {client.client_id: f"ws://{client.client_id}" for client in clients}
         self.reclaim_requests: list[str] = []
+        # server time in microseconds
+        self.clock = SimpleNamespace(now_us=lambda: 10_000_000)
 
     @property
     def clients(self) -> list[_FakeClient]:
@@ -193,6 +197,8 @@ class _FakePlayers:
         self.updated: list[str] = []
         # the rebuilt sources handed to a session, with the player it plays on
         self.refreshed: list[tuple[str, Any]] = []
+        # live metadata pushed to a session, with the player it plays on
+        self.source_metadata: list[tuple[str, Any]] = []
 
     def get_player(self, player_id: str, *args: Any, **kwargs: Any) -> _FakePlayer | None:
         return self.players.get(player_id)
@@ -214,6 +220,11 @@ class _FakePlayers:
 
     def refresh_source(self, player_id: str, source: Any) -> None:
         self.refreshed.append((player_id, source))
+
+    def update_source_metadata(
+        self, player_id: str, source_id: str, provider_instance_id: str, stream_metadata: Any
+    ) -> None:
+        self.source_metadata.append((player_id, stream_metadata))
 
     async def deselect_source(
         self,

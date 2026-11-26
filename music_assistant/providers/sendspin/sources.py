@@ -24,6 +24,7 @@ from aiosendspin.server import (
     ClientDisconnectedEvent,
     ClientRemovedEvent,
     SignalState,
+    SourceMetadataChangedEvent,
     SourceSignalChangedEvent,
     SourceStreamEndedEvent,
     SourceStreamStartedEvent,
@@ -42,7 +43,7 @@ from music_assistant_models.errors import (
 )
 from music_assistant_models.helpers import create_uri
 from music_assistant_models.media_items import AudioFormat, AudioSource, ProviderMapping
-from music_assistant_models.streamdetails import StreamDetails
+from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 
 from music_assistant.constants import CONF_ALLOW_AUDIO_ANALYSIS
 from music_assistant.helpers.player import get_available_player
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
 
     from aiosendspin.audio import SourceBridge
+    from aiosendspin.models.source import SourceMetadata
     from aiosendspin.server import (
         ClientEvent,
         SendspinClient,
@@ -249,6 +251,7 @@ class SendspinSources:
             audio_format=audio_format,
             media_type=media_type,
             stream_type=StreamType.CUSTOM,
+            stream_metadata=self._stream_metadata(client),
         )
 
     async def on_source_selected(
@@ -444,6 +447,56 @@ class SendspinSources:
         # the session publishes the source it was selected with, so hand it the new one
         self.mass.players.refresh_source(session.owner_player_id, self._audio_source(client))
 
+    def _stream_metadata(self, client: SendspinClient) -> StreamMetadata | None:
+        """
+        Return what the input plays, as its source reported it, for Music Assistant to show.
+
+        None while the source reports nothing, so now playing shows the input by its name
+        and audio analysis can say what it recognises.
+        """
+        role = self._get_source_role(client)
+        metadata = role.metadata if role is not None else None
+        if metadata is None:
+            return None
+        name = self._source_name(client.client_id)
+        elapsed_s: int | None = None
+        elapsed_updated: float | None = None
+        duration_s: int | None = None
+        if (progress := metadata.progress) is not None:
+            duration_s = progress.track_duration // 1000 or None
+            # progress is stamped in server time; move it on to now at the reported speed
+            age_s = max(0, self.provider.server_api.clock.now_us() - metadata.timestamp) / 1e6
+            position_ms = progress.track_progress + age_s * progress.playback_speed
+            if progress.track_duration:
+                position_ms = min(position_ms, progress.track_duration)
+            elapsed_s = int(position_ms // 1000)
+            elapsed_updated = time.time()
+        return StreamMetadata(
+            title=metadata.title or name,
+            artist=metadata.artist or metadata.album_artist,
+            album=metadata.album,
+            image_url=_http_url(metadata),
+            duration=duration_s,
+            elapsed_time=elapsed_s,
+            elapsed_time_last_updated=elapsed_updated,
+        )
+
+    def _publish_stream_metadata(self, session: _SourceSession, client: SendspinClient) -> None:
+        """
+        Hand the session's player what the source now reports.
+
+        A report once made cannot be taken back, so a withdrawn one shows the input's name.
+        """
+        stream_metadata = self._stream_metadata(client) or StreamMetadata(
+            title=self._source_name(client.client_id)
+        )
+        self.mass.players.update_source_metadata(
+            session.owner_player_id,
+            client.client_id,
+            self.provider.instance_id,
+            stream_metadata,
+        )
+
     def _get_client(self, client_id: str) -> SendspinClient | None:
         return self.provider.server_api.get_client(client_id)
 
@@ -604,7 +657,14 @@ class SendspinSources:
         session = self._get_session(client_id)
         if session is None:
             return
+        if isinstance(event, SourceMetadataChangedEvent):
+            self._publish_stream_metadata(session, client)
+            return
         if isinstance(event, SourceStreamStartedEvent):
+            # Reported rather than left to the stream details, so audio analysis does not
+            # replace what the source said.
+            if (role := self._get_source_role(client)) is not None and role.metadata is not None:
+                self._publish_stream_metadata(session, client)
             self.mass.create_task(self._attach_stream(session, event))
         elif isinstance(event, SourceStreamEndedEvent):
             self.logger.debug("Sendspin source %s ended its stream", client_id)
@@ -883,3 +943,9 @@ class SendspinSources:
 
     def _autostop_timer_id(self, client_id: str) -> str:
         return f"{self.provider.instance_id}_autostop_{client_id}"
+
+
+def _http_url(metadata: SourceMetadata) -> str | None:
+    """Return the artwork URL if a player and the frontend can fetch it."""
+    url = metadata.artwork_url
+    return url if url and url.startswith(("http://", "https://")) else None

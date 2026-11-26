@@ -11,10 +11,13 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 from aiosendspin.audio import AudioFormat as SendspinAudioFormat
+from aiosendspin.models.metadata import Progress
+from aiosendspin.models.source import SourceMetadata
 from aiosendspin.server import (
     ClientConnectedEvent,
     ClientDisconnectedEvent,
     SignalState,
+    SourceMetadataChangedEvent,
     SourceSignalChangedEvent,
     SourceStreamEndedEvent,
     SourceStreamStartedEvent,
@@ -1194,3 +1197,91 @@ async def test_deferred_reconnect_does_not_rewatch_after_unload(fake_client: _Fa
     await sources.stop()
     await _settle()
     assert fake_client.listeners == []
+
+
+_SO_WHAT = SourceMetadata(
+    timestamp=8_000_000,
+    title="So What",
+    artist="Miles Davis",
+    album="Kind of Blue",
+    artwork_url="https://example.com/kob.jpg",
+    progress=Progress(track_progress=5_000, track_duration=562_000, playback_speed=1_000),
+)
+
+
+async def test_stream_details_show_what_the_input_plays(fake_client: _FakeClient) -> None:
+    """Reported metadata becomes the stream metadata, its position moved on to now."""
+    sources = await make_sources([fake_client])
+    assert fake_client.source_role is not None
+    fake_client.source_role.metadata = _SO_WHAT
+
+    details = await sources.get_stream_details("client-1", MediaType.AUDIO_SOURCE)
+    metadata = details.stream_metadata
+    assert metadata is not None
+    assert (metadata.title, metadata.artist, metadata.album) == (
+        "So What",
+        "Miles Davis",
+        "Kind of Blue",
+    )
+    assert metadata.image_url == "https://example.com/kob.jpg"
+    assert metadata.duration == 562
+    # reported at 8 s server time, read at 10 s: 5 s in, plus 2 s at normal speed
+    assert metadata.elapsed_time == 7
+    assert metadata.elapsed_time_last_updated is not None
+
+
+async def test_a_paused_input_does_not_move_on(fake_client: _FakeClient) -> None:
+    """At speed 0 the reported position is the position now."""
+    sources = await make_sources([fake_client])
+    assert fake_client.source_role is not None
+    fake_client.source_role.metadata = SourceMetadata(
+        timestamp=0,
+        title="So What",
+        progress=Progress(track_progress=5_000, track_duration=0, playback_speed=0),
+    )
+    details = await sources.get_stream_details("client-1", MediaType.AUDIO_SOURCE)
+    assert details.stream_metadata is not None
+    assert details.stream_metadata.elapsed_time == 5
+    assert details.stream_metadata.duration is None
+
+
+async def test_an_untitled_report_shows_the_input_name(fake_client: _FakeClient) -> None:
+    """A report without a title is titled by the input; artwork a player cannot fetch is dropped."""
+    sources = await make_sources([fake_client])
+    name = sources._source_name("client-1")
+    assert fake_client.source_role is not None
+    fake_client.source_role.metadata = SourceMetadata(
+        timestamp=0, artist="Miles Davis", artwork_url="file:///kob.jpg"
+    )
+    details = await sources.get_stream_details("client-1", MediaType.AUDIO_SOURCE)
+    assert details.stream_metadata is not None
+    assert (details.stream_metadata.title, details.stream_metadata.artist) == (
+        name,
+        "Miles Davis",
+    )
+    assert details.stream_metadata.image_url is None
+
+
+async def test_reported_metadata_reaches_the_playing_session(fake_client: _FakeClient) -> None:
+    """A change while the input plays is pushed to its player; an idle input pushes nothing."""
+    sources = await make_sources([fake_client])
+    players = get_players(sources)
+    assert fake_client.source_role is not None
+
+    fake_client.source_role.metadata = _SO_WHAT
+    fake_client.emit(SourceMetadataChangedEvent(metadata=_SO_WHAT))
+    assert players.source_metadata == []
+
+    await sources.on_source_selected("client-1", "player-1", "queue-1", "session-A")
+    assert players.source_metadata == []
+    # what was already known is reported once the stream starts
+    fake_client.emit(SourceStreamStartedEvent(audio_format=NATIVE_FORMAT, handle=_fake_handle([])))
+    assert [(p, m.title) for p, m in players.source_metadata] == [("queue-1", "So What")]
+
+    # a withdrawn report cannot be taken back, so the input's name stands in
+    fake_client.source_role.metadata = None
+    fake_client.emit(SourceMetadataChangedEvent(metadata=None))
+    assert [(p, m.title) for p, m in players.source_metadata][-1] == (
+        "queue-1",
+        sources._source_name("client-1"),
+    )

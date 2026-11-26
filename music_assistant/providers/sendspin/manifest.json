@@ -8,7 +8,7 @@
   "codeowners": ["@music-assistant"],
   "credits": ["[Sendspin](https://sendspin-audio.com)"],
   "provides": ["audio_source"],
-  "requirements": ["aiosendspin[server]==11.0.0", "av==19.0.2", "soxr==1.1.0"],
+  "requirements": ["aiosendspin[server] @ git+https://github.com/meiser79/aiosendspin@9d85f2b059430f3cb41dd0da3ce530ca7956bae7", "av==19.0.2", "soxr==1.1.0"],
   "builtin": true,
   "allow_disable": false
 }
